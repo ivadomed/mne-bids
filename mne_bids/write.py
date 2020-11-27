@@ -1245,7 +1245,152 @@ def write_raw_bids(raw, bids_path, events_data=None,
     return bids_path
 
 
-def write_anat(image, bids_path, raw=None, trans=None, landmarks=None,
+
+def write_trials_bids(epochs, bids_path, overwrite=False, verbose=True):
+    # First try for IVADOMED export
+
+    '''if not isinstance(epochs, FINDWHATTOPUTHERE):
+        raise ValueError('raw_file must be an instance of BaseRaw, '
+                         'got %s' % type(raw))
+
+    if not hasattr(epochs, 'filenames') or epochs.filenames[0] is None:
+        raise ValueError('epochs.filenames is missing. Please set epochs.filenames'
+                         'as a list with the full path of original raw file.')'''
+
+    if not isinstance(bids_path, BIDSPath):
+        raise RuntimeError('"bids_path" must be a BIDSPath object. Please '
+                           'instantiate using mne_bids.BIDSPath().')
+
+    # Check if the root is available
+    if bids_path.root is None:
+        raise ValueError('The root of the "bids_path" must be set. '
+                         'Please use `bids_path.update(root="<root>")` '
+                         'to set the root of the BIDS folder to read.')
+
+    '''if events_data is not None and event_id is None:
+        raise RuntimeError('You passed events_data, but no event_id '
+                           'dictionary. You need to pass both, or neither.')'''
+
+    '''if epochs.event_id is not None and events_data is None:
+        raise RuntimeError('You passed event_id, but no events_data NumPy '
+                           'array. You need to pass both, or neither.')'''
+
+    convert = False
+
+    datatype = _handle_datatype(epochs)
+
+    bids_path = bids_path.copy()
+    bids_path = bids_path.update(datatype=datatype, suffix=datatype)
+
+    data_path = bids_path.mkdir().directory
+
+    # In case of an "emptyroom" subject, BIDSPath() will raise
+    # an exception if we don't provide a valid task ("noise"). Now,
+    # scans_fname, electrodes_fname, and coordsystem_fname must NOT include
+    # the task entity. Therefore, we cannot generate them with
+    # BIDSPath() directly. Instead, we use BIDSPath() directly
+    # as it does not make any advanced check.
+
+    # create *_scans.tsv
+    session_path = BIDSPath(subject=bids_path.subject,
+                            session=bids_path.session, root=bids_path.root)
+    scans_path = session_path.copy().update(suffix='scans', extension='.tsv')
+
+    # create *_coordsystem.json
+    coordsystem_path = session_path.copy().update(
+        acquisition=bids_path.acquisition, space=bids_path.space,
+        datatype=bids_path.datatype, suffix='coordsystem', extension='.json')
+
+    # create *_electrodes.tsv
+    electrodes_path = bids_path.copy().update(
+        suffix='electrodes', extension='.tsv')
+
+    # For the remaining files, we can use BIDSPath to alter.
+    readme_fname = op.join(bids_path.root, 'README')
+    participants_tsv_fname = op.join(bids_path.root, 'participants.tsv')
+    participants_json_fname = participants_tsv_fname.replace('tsv',
+                                                             'json')
+
+    sidecar_path = bids_path.copy().update(suffix=bids_path.datatype,
+                                           extension='.json')
+    events_path = bids_path.copy().update(suffix='events', extension='.tsv')
+    channels_path = bids_path.copy().update(
+        suffix='channels', extension='.tsv')
+
+    # save readme file unless it already exists
+    # XXX: can include README overwrite in future if using a template API
+    # XXX: see https://github.com/mne-tools/mne-bids/issues/551
+    _readme(bids_path.datatype, readme_fname, False, verbose)
+
+    # save all participants meta data
+    _participants_tsv(epochs, bids_path.subject, participants_tsv_fname,
+                      overwrite, verbose)
+    _participants_json(participants_json_fname, True, verbose)
+
+    # for MEG, we only write coordinate system
+    if bids_path.datatype == 'meg' and not emptyroom:
+        _coordsystem_json(raw=raw, unit=unit, hpi_coord_system=orient,
+                          sensor_coord_system=orient,
+                          fname=coordsystem_path.fpath,
+                          datatype=bids_path.datatype,
+                          overwrite=overwrite, verbose=verbose)
+    elif bids_path.datatype in ['eeg', 'ieeg']:
+        # We only write electrodes.tsv and accompanying coordsystem.json
+        # if we have an available DigMontage
+        if epochs.info['dig'] is not None and epochs.info['dig']:
+            _write_dig_bids(electrodes_path, coordsystem_path,
+                            bids_path.root, epochs, bids_path.datatype,
+                            overwrite, verbose)
+    else:
+        logger.warning(f'Writing of electrodes.tsv is not supported '
+                       f'for data type "{bids_path.datatype}". Skipping ...')
+
+    '''events, event_id = _read_events(events_data, event_id, raw,
+                                    verbose=False)
+    if events is not None and len(events) > 0 and not emptyroom:
+        _events_tsv(events, raw, events_path.fpath, event_id,
+                    overwrite, verbose)'''
+
+    make_dataset_description(bids_path.root, name=" ", overwrite=overwrite,
+                             verbose=verbose)
+
+    #_sidecar_json(raw, bids_path.task, manufacturer, sidecar_path.fpath,
+                  #bids_path.datatype, overwrite, verbose)
+
+    '''
+    _channels_tsv(epochs, channels_path.fpath, overwrite, verbose)
+    '''
+
+
+    # create parent directories if needed
+    _mkdir_p(os.path.dirname(data_path))
+
+    if os.path.exists(bids_path.fpath) and not overwrite:
+        raise FileExistsError(
+            f'"{bids_path.fpath}" already exists. '  # noqa: F821
+            'Please set overwrite to True.')
+
+    # Convert to Dataframe and save to file
+    df = epochs.to_data_frame()
+
+    '''# Create EEG channel selector and drop EOG channel.
+    eeg_chs = [c for c in df.columns if 'EEG' in c]
+    df.pop('EOG 061')  # this works just like with a list.
+    '''
+
+    df.to_csv(os.path.join(bids_path.directory,bids_path.basename + '.ivadomed'), index=False)
+
+    # write to the scans.tsv file the output file written
+    scan_relative_fpath = op.join(bids_path.datatype, bids_path.fpath.name)
+    _scans_tsv(epochs, scan_relative_fpath, scans_path.fpath, overwrite, verbose)
+    if verbose:
+        print(f'Wrote {scans_path.fpath} entry with {scan_relative_fpath}.')
+
+    return bids_path
+
+
+
+def write_anat(t1w, bids_path, raw=None, trans=None, landmarks=None,
                deface=False, overwrite=False, verbose=False):
     """Put anatomical MRI data into a BIDS format.
 
